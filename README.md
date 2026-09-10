@@ -46,7 +46,7 @@ skkuding-linux/
 ### 전제 조건
 
 - Oracle Cloud (또는 기타) VM
-- RAM 16GB 이상 (컨테이너당 최대 8GB 제한)
+- RAM: 컨테이너 수 × `CONTAINER_MEMORY`(기본 1536MB)를 감안 (초과 시 swap 사용)
 - `CONTAINER_COUNT` 개수만큼 Secondary Private IP + 각각 공인 IP 할당
 - 도메인 및 DNS 설정 완료
 - `apt-get` 또는 `dnf` 사용 가능
@@ -132,13 +132,31 @@ cd /opt/lxd-classroom && sudo npm install
 sed \
   -e "s/__RUN_USER__/ubuntu/g" \
   -e "s/__RUN_GROUP__/ubuntu/g" \
+  -e "s/__RUNTIME_GROUP__/lxd/g" \
+  -e "s/__RUNTIME_UNIT__/snap.lxd.daemon.service/g" \
+  -e "s/__CONTAINER_RUNTIME__/lxd/g" \
+  -e "s/__RUNTIME_CLIENT__/lxc/g" \
   -e "s/__CONTAINER_COUNT__/10/g" \
   -e "s/__CONTAINER_IP_OFFSET__/10/g" \
+  -e "s/__CONTAINER_IP_PREFIX__/10.10.0/g" \
+  -e "s/__CONTAINER_MEMORY__/1536MB/g" \
+  -e "s/__CONTAINER_SWAP__/true/g" \
+  -e "s|__CONTAINER_EXTRA_PACKAGES__||g" \
+  -e "s/__CONTAINER_SSH_ENABLED__/0/g" \
+  -e "s|__CONTAINER_IMAGE__|ubuntu:24.04|g" \
+  -e "s/__LXD_BRIDGE_NAME__/lxdbr0/g" \
   -e "s/__LXD_BRIDGE_IP__/10.10.0.1/g" \
+  -e "s|__STORAGE_CONTAINERS_PATH__|/var/snap/lxd/common/lxd/storage-pools/default/containers|g" \
+  -e "s/__BIND_ADDRESS__/127.0.0.1/g" \
   config/lxd-classroom.service.template | sudo tee /etc/systemd/system/lxd-classroom.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now lxd-classroom
 ```
+
+> Incus로 수동 설치하는 경우 `CONTAINER_RUNTIME=incus`, `RUNTIME_CLIENT=incus`,
+> `RUNTIME_GROUP=incus-admin`, `RUNTIME_UNIT=incus.socket`, `CONTAINER_IMAGE=images:ubuntu/noble`,
+> `LXD_BRIDGE_NAME=incusbr0`, `STORAGE_CONTAINERS_PATH=/var/lib/incus/storage-pools/default/containers`로 치환하세요.
+> `bash setup.sh`를 쓰면 이 치환이 자동으로 처리됩니다.
 
 #### 4. Caddy
 
@@ -195,9 +213,20 @@ bash app/scripts/create-containers.sh
 | 파일 | 수정 항목 |
 |------|----------|
 | `.env` | `DOMAIN`, `HOST_IFACE`, `INSTALL_USER`, `CONTAINER_COUNT`, `CONTAINER_IP_OFFSET`, `SECONDARY_IPS` |
+| `.env` | `CONTAINER_RUNTIME`(`lxd`/`incus`), `CONTAINER_MEMORY`, `CONTAINER_SWAP`, `CONTAINER_EXTRA_PACKAGES`, `CONTAINER_SSH_ENABLED` |
+| `.env` | `LXD_BRIDGE_IP`, `LXD_BRIDGE_SUBNET`, `CONTAINER_IP_PREFIX`, `BIND_ADDRESS`, `ENABLE_PUBLIC_IPS`, `ENABLE_CADDY` |
 | `app/data.json` (설치 후) | `externalIps` (공인 IP) |
 
-> **참고**: 컨테이너 내부 네트워크(10.10.0.0/24)와 LXD 브리지는 외부 NIC 대역과 무관하므로 변경 불필요.
+주요 변수:
+
+- `CONTAINER_RUNTIME`: `lxd`(기본, snap 필요) 또는 `incus`(Zabbly apt 저장소, snap 불필요).
+- `CONTAINER_MEMORY` / `CONTAINER_SWAP`: 컨테이너 메모리 제한과 swap.
+  `CONTAINER_SWAP=true`는 메모리와 같은 크기를 뜻하며, Incus(cgroup2)에서는 자동으로 바이트 값으로 변환됩니다.
+- `CONTAINER_EXTRA_PACKAGES`: 생성 시 컨테이너에 설치할 패키지 목록(공백 구분).
+- `CONTAINER_SSH_ENABLED`: `1`이면 sshd 활성화, 기본 `0`(비활성). openssh-server는 설치됩니다.
+- `ENABLE_PUBLIC_IPS=0` + `ENABLE_CADDY=0`: 웹 터미널 전용 모드. `BIND_ADDRESS=0.0.0.0`으로 노출.
+
+> **참고**: 컨테이너 내부 네트워크와 브리지는 외부 NIC 대역과 겹치지 않으면 됩니다.
 > `config/` 안의 템플릿/규칙 파일은 `setup.sh`가 읽어서 실제 설정 파일을 생성합니다.
 
 ---
@@ -242,8 +271,9 @@ lxc list                        # 컨테이너 상태
 
 ## 보안 설정
 
-- 컨테이너당 RAM 8GB 하드 캡 (`limits.memory`)
-- swap 사용 금지 (`limits.memory.swap false`)
+- 컨테이너당 메모리 하드 캡 (`limits.memory`, 기본 `CONTAINER_MEMORY=1536MB`)
+- 컨테이너 swap 허용 (`limits.memory.swap`; Incus/cgroup2에서는 메모리와 같은 바이트 값으로 변환)
+- 컨테이너별 독립 systemd/rootfs/네트워크 네임스페이스 (호스트 커널 공유)
 - 포트 25/465/587 (SMTP) 차단
 - 포트 6881-6889 (BitTorrent) 차단
 - 컨테이너 격리 — 한 컨테이너 문제가 다른 컨테이너에 영향 없음

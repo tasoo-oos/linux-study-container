@@ -16,7 +16,18 @@ const wss = new WebSocketServer({ server });
 const DATA_FILE = path.join(__dirname, 'data.json');
 const CONTAINER_COUNT = Number.parseInt(process.env.CONTAINER_COUNT || '10', 10);
 const CONTAINER_IP_OFFSET = Number.parseInt(process.env.CONTAINER_IP_OFFSET || '10', 10);
+const CONTAINER_IP_PREFIX = process.env.CONTAINER_IP_PREFIX || '10.10.0';
+const CONTAINER_MEMORY = process.env.CONTAINER_MEMORY || '1536MB';
+const CONTAINER_SWAP = process.env.CONTAINER_SWAP || 'true';
+const CONTAINER_EXTRA_PACKAGES = process.env.CONTAINER_EXTRA_PACKAGES || '';
+const CONTAINER_SSH_ENABLED = process.env.CONTAINER_SSH_ENABLED || '0';
+const CONTAINER_RUNTIME = process.env.CONTAINER_RUNTIME || 'lxd';
+const LXC_BIN = process.env.RUNTIME_CLIENT || 'lxc';
+const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'ubuntu:24.04';
+const LXD_BRIDGE_NAME = process.env.LXD_BRIDGE_NAME || 'lxdbr0';
+const STORAGE_CONTAINERS_PATH = process.env.STORAGE_CONTAINERS_PATH || '';
 const LXD_BRIDGE_IP = process.env.LXD_BRIDGE_IP || '10.10.0.1';
+const BIND_ADDRESS = process.env.BIND_ADDRESS || '127.0.0.1';
 
 if (!Number.isInteger(CONTAINER_COUNT) || CONTAINER_COUNT < 1 || CONTAINER_COUNT > 100) {
   throw new Error('CONTAINER_COUNT must be an integer between 1 and 100');
@@ -51,7 +62,7 @@ function requireValidContainerId(value, errorMessage) {
 }
 
 function containerIp(containerId) {
-  return `10.10.0.${CONTAINER_IP_OFFSET + Number.parseInt(containerId, 10)}`;
+  return `${CONTAINER_IP_PREFIX}.${CONTAINER_IP_OFFSET + Number.parseInt(containerId, 10)}`;
 }
 
 function formatBytes(bytes) {
@@ -109,7 +120,7 @@ for line in open('/etc/shadow'):
         sys.exit(0 if crypt.crypt(pw, h) == h else 1)
 sys.exit(1)
 `;
-  const result = spawnSync('lxc', ['exec', `server${containerId}`, '--', 'python3', '-c', script], {
+  const result = spawnSync(LXC_BIN, ['exec', `server${containerId}`, '--', 'python3', '-c', script], {
     input: password,
     encoding: 'utf8',
     timeout: 5000
@@ -193,7 +204,7 @@ app.get('/api/admin/containers', requireAdmin, (req, res) => {
   let stateMap = {};
   let usageMap = {};
   try {
-    const out = execSync('lxc list "^server[0-9]+$" --format=csv -c n,s', { encoding: 'utf8' });
+    const out = execSync(`${LXC_BIN} list "^server[0-9]+$" --format=csv -c n,s`, { encoding: 'utf8' });
     out.trim().split('\n').filter(Boolean).forEach(line => {
       const [name, state] = line.split(',');
       const id = name.replace('server', '');
@@ -203,7 +214,7 @@ app.get('/api/admin/containers', requireAdmin, (req, res) => {
       usageMap[id] = '-';
       if (normalizedState !== 'running') return;
       try {
-        const stateJson = execSync(`lxc query /1.0/instances/server${id}/state`, {
+        const stateJson = execSync(`${LXC_BIN} query /1.0/instances/server${id}/state`, {
           encoding: 'utf8',
           timeout: 5000,
         });
@@ -269,11 +280,23 @@ const resetStatus = new Map(); // cid -> 'pending' | 'resetting' | 'done' | 'err
 const resetQueue = [];         // [{cid, clearNickname}] 순서대로 대기
 let resetQueueRunning = false;
 
-const RESET_SCRIPT_ENV = () => [
-  `CONTAINER_COUNT=${CONTAINER_COUNT}`,
-  `CONTAINER_IP_OFFSET=${CONTAINER_IP_OFFSET}`,
-  `LXD_BRIDGE_IP=${LXD_BRIDGE_IP}`,
-].join(' ');
+// Values passed to create-containers.sh on reset. Passed as a child-process
+// env object (not a shell string) so values with spaces/quotes are safe.
+const RESET_SCRIPT_VALUES = () => ({
+  CONTAINER_RUNTIME,
+  RUNTIME_CLIENT: LXC_BIN,
+  CONTAINER_COUNT: String(CONTAINER_COUNT),
+  CONTAINER_IP_OFFSET: String(CONTAINER_IP_OFFSET),
+  CONTAINER_IP_PREFIX,
+  CONTAINER_MEMORY,
+  CONTAINER_SWAP,
+  CONTAINER_EXTRA_PACKAGES,
+  CONTAINER_SSH_ENABLED,
+  CONTAINER_IMAGE,
+  LXD_BRIDGE_NAME,
+  LXD_BRIDGE_IP,
+  STORAGE_CONTAINERS_PATH,
+});
 
 async function processResetQueue() {
   if (resetQueueRunning) return;
@@ -285,7 +308,10 @@ async function processResetQueue() {
     let succeeded = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await execAsync(`${RESET_SCRIPT_ENV()} bash "${scriptPath}" ${cid}`, { timeout: 300000 });
+        await execAsync(`bash "${scriptPath}" ${cid}`, {
+          timeout: 300000,
+          env: { ...process.env, ...RESET_SCRIPT_VALUES() },
+        });
         succeeded = true;
         break;
       } catch (e) {
@@ -372,7 +398,7 @@ wss.on('connection', (ws, req) => {
 
   let ptyProcess;
   try {
-    ptyProcess = pty.spawn('lxc', ['exec', `server${containerId}`, '--', 'su', '-', 'server'], {
+    ptyProcess = pty.spawn(LXC_BIN, ['exec', `server${containerId}`, '--', 'su', '-', 'server'], {
       name: 'xterm-256color',
       cols: 80,
       rows: 24,
@@ -411,6 +437,6 @@ wss.on('connection', (ws, req) => {
 });
 
 const PORT = 3000;
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`LXD Classroom running on http://127.0.0.1:${PORT}`);
+server.listen(PORT, BIND_ADDRESS, () => {
+  console.log(`LXD Classroom running on http://${BIND_ADDRESS}:${PORT}`);
 });

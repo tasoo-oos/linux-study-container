@@ -1,21 +1,32 @@
 [Unit]
 Description=LXD Classroom Web App
-After=network.target snap.lxd.daemon.service
-Wants=snap.lxd.daemon.service
+After=network.target __RUNTIME_UNIT__
+Wants=__RUNTIME_UNIT__
 
 [Service]
 Type=simple
 User=__RUN_USER__
 Group=__RUN_GROUP__
-SupplementaryGroups=lxd
+SupplementaryGroups=__RUNTIME_GROUP__
 WorkingDirectory=/opt/lxd-classroom
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
+Environment=CONTAINER_RUNTIME=__CONTAINER_RUNTIME__
+Environment=RUNTIME_CLIENT=__RUNTIME_CLIENT__
 Environment=CONTAINER_COUNT=__CONTAINER_COUNT__
 Environment=CONTAINER_IP_OFFSET=__CONTAINER_IP_OFFSET__
+Environment=CONTAINER_IP_PREFIX=__CONTAINER_IP_PREFIX__
+Environment=CONTAINER_MEMORY=__CONTAINER_MEMORY__
+Environment=CONTAINER_SWAP=__CONTAINER_SWAP__
+Environment="CONTAINER_EXTRA_PACKAGES=__CONTAINER_EXTRA_PACKAGES__"
+Environment=CONTAINER_SSH_ENABLED=__CONTAINER_SSH_ENABLED__
+Environment=CONTAINER_IMAGE=__CONTAINER_IMAGE__
+Environment=LXD_BRIDGE_NAME=__LXD_BRIDGE_NAME__
 Environment=LXD_BRIDGE_IP=__LXD_BRIDGE_IP__
+Environment=STORAGE_CONTAINERS_PATH=__STORAGE_CONTAINERS_PATH__
+Environment=BIND_ADDRESS=__BIND_ADDRESS__
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 StandardOutput=journal
 StandardError=journal

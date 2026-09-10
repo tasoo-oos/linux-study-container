@@ -14,6 +14,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
+# Declared empty so ${#SECONDARY_IPS[@]} is safe under `set -u` when .env
+# leaves it undefined; .env replaces it when it does define the array.
+SECONDARY_IPS=()
+
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
@@ -26,9 +30,84 @@ CONTAINER_COUNT="${CONTAINER_COUNT:-10}"
 CONTAINER_IP_OFFSET="${CONTAINER_IP_OFFSET:-10}"
 LXD_BRIDGE_IP="${LXD_BRIDGE_IP:-10.10.0.1}"
 LXD_BRIDGE_SUBNET="${LXD_BRIDGE_SUBNET:-10.10.0.0/24}"
+CONTAINER_IP_PREFIX="${CONTAINER_IP_PREFIX:-${LXD_BRIDGE_IP%.*}}"
+CONTAINER_MEMORY="${CONTAINER_MEMORY:-1536MB}"
+CONTAINER_SWAP="${CONTAINER_SWAP:-true}"
+CONTAINER_EXTRA_PACKAGES="${CONTAINER_EXTRA_PACKAGES:-}"
+CONTAINER_SSH_ENABLED="${CONTAINER_SSH_ENABLED:-0}"
+BIND_ADDRESS="${BIND_ADDRESS:-127.0.0.1}"
+ENABLE_PUBLIC_IPS="${ENABLE_PUBLIC_IPS:-1}"
+ENABLE_CADDY="${ENABLE_CADDY:-1}"
 
-if [[ -z "$DOMAIN" || -z "$HOST_IFACE" || -z "$INSTALL_USER" ]]; then
-  echo "오류: DOMAIN, HOST_IFACE, INSTALL_USER는 .env에 반드시 설정해야 합니다."
+# 컨테이너 런타임: lxd (기본) 또는 incus (snap 없이 사용 가능한 LXD 포크)
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-lxd}"
+LXD_BRIDGE_NAME="${LXD_BRIDGE_NAME:-}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-}"
+CONTAINER_RUNTIME_GROUP="${CONTAINER_RUNTIME_GROUP:-}"
+STORAGE_CONTAINERS_PATH="${STORAGE_CONTAINERS_PATH:-}"
+RUNTIME_UNIT="${RUNTIME_UNIT:-}"
+
+case "$CONTAINER_RUNTIME" in
+  incus)
+    RUNTIME_CLIENT="${RUNTIME_CLIENT:-incus}"
+    RUNTIME_DAEMON="${RUNTIME_DAEMON:-incusd}"
+    SERVER_INIT_MODE="incus"
+    RUNTIME_UNIT="${RUNTIME_UNIT:-incus.socket}"
+    LXD_BRIDGE_NAME="${LXD_BRIDGE_NAME:-incusbr0}"
+    CONTAINER_IMAGE="${CONTAINER_IMAGE:-images:ubuntu/noble}"
+    CONTAINER_RUNTIME_GROUP="${CONTAINER_RUNTIME_GROUP:-incus-admin}"
+    STORAGE_CONTAINERS_PATH="${STORAGE_CONTAINERS_PATH:-/var/lib/incus/storage-pools/default/containers}"
+    ;;
+  lxd)
+    RUNTIME_CLIENT="${RUNTIME_CLIENT:-lxc}"
+    RUNTIME_DAEMON="${RUNTIME_DAEMON:-lxd}"
+    SERVER_INIT_MODE="lxd"
+    RUNTIME_UNIT="${RUNTIME_UNIT:-snap.lxd.daemon.service}"
+    LXD_BRIDGE_NAME="${LXD_BRIDGE_NAME:-lxdbr0}"
+    CONTAINER_IMAGE="${CONTAINER_IMAGE:-ubuntu:24.04}"
+    CONTAINER_RUNTIME_GROUP="${CONTAINER_RUNTIME_GROUP:-lxd}"
+    STORAGE_CONTAINERS_PATH="${STORAGE_CONTAINERS_PATH:-/var/snap/lxd/common/lxd/storage-pools/default/containers}"
+    ;;
+  *)
+    echo "오류: CONTAINER_RUNTIME은 lxd 또는 incus 여야 합니다."
+    exit 1
+    ;;
+esac
+
+# Incus(cgroup2 + 하드 메모리 제한)에서는 boolean true가 swap 0이 되므로
+# true면 메모리 제한과 같은 크기의 swap 바이트 값으로 변환한다.
+# LXD는 이 키를 bool로만 검증하므로 바이트 값을 넘기면 안 된다.
+if [[ "$CONTAINER_RUNTIME" == "incus" && "$CONTAINER_SWAP" == "true" ]]; then
+  CONTAINER_SWAP="$CONTAINER_MEMORY"
+fi
+
+if [[ "$ENABLE_CADDY" == "0" && "$BIND_ADDRESS" == "127.0.0.1" ]]; then
+  echo "경고: ENABLE_CADDY=0 인데 BIND_ADDRESS=127.0.0.1 이라 외부에서 접속할 수 없습니다."
+  echo "      .env에 BIND_ADDRESS=0.0.0.0 을 설정하세요."
+fi
+
+if [[ "$ENABLE_PUBLIC_IPS" != "1" && "$ENABLE_PUBLIC_IPS" != "0" ]]; then
+  echo "오류: ENABLE_PUBLIC_IPS는 0 또는 1이어야 합니다."
+  exit 1
+fi
+
+if [[ "$ENABLE_CADDY" != "1" && "$ENABLE_CADDY" != "0" ]]; then
+  echo "오류: ENABLE_CADDY는 0 또는 1이어야 합니다."
+  exit 1
+fi
+
+if [[ "$ENABLE_CADDY" == "1" && -z "$DOMAIN" ]]; then
+  echo "오류: DOMAIN은 .env에 반드시 설정해야 합니다. (ENABLE_CADDY=0이면 불필요)"
+  exit 1
+fi
+
+if [[ "$ENABLE_PUBLIC_IPS" == "1" && -z "$HOST_IFACE" ]]; then
+  echo "오류: HOST_IFACE는 .env에 반드시 설정해야 합니다. (ENABLE_PUBLIC_IPS=0이면 불필요)"
+  exit 1
+fi
+
+if [[ -z "$INSTALL_USER" ]]; then
+  echo "오류: INSTALL_USER는 .env에 반드시 설정해야 합니다."
   exit 1
 fi
 
@@ -47,14 +126,14 @@ if ! [[ "$CONTAINER_IP_OFFSET" =~ ^[0-9]+$ ]] || (( CONTAINER_IP_OFFSET < 2 || C
   exit 1
 fi
 
-if [[ ${#SECONDARY_IPS[@]} -ne $CONTAINER_COUNT ]]; then
+if [[ "$ENABLE_PUBLIC_IPS" == "1" && ${#SECONDARY_IPS[@]} -ne $CONTAINER_COUNT ]]; then
   echo "오류: SECONDARY_IPS 개수는 CONTAINER_COUNT와 같아야 합니다. 현재 ${#SECONDARY_IPS[@]}개 / 설정값 ${CONTAINER_COUNT}개입니다."
   exit 1
 fi
 
 CONTAINER_IPS=()
 for i in $(seq 0 $((CONTAINER_COUNT - 1))); do
-  CONTAINER_IPS+=("10.10.0.$((CONTAINER_IP_OFFSET + i))")
+  CONTAINER_IPS+=("${CONTAINER_IP_PREFIX}.$((CONTAINER_IP_OFFSET + i))")
 done
 
 if (( CONTAINER_IP_OFFSET + CONTAINER_COUNT - 1 > 254 )); then
@@ -83,8 +162,8 @@ if [[ ":$PATH:" != *":/snap/bin:"* ]]; then
   export PATH="$PATH:/snap/bin"
 fi
 
-LXD_BIN=""
-LXC_BIN=""
+RUNTIME_CLIENT_BIN=""
+RUNTIME_DAEMON_BIN=""
 
 NFTABLES_CONF="/etc/sysconfig/nftables.conf"
 if [[ "$PKG_MGR" == "apt" ]]; then
@@ -136,47 +215,54 @@ ensure_snap_path() {
   fi
 }
 
-wait_for_lxc() {
+wait_for_runtime_client() {
   local tries=0
   while (( tries < 30 )); do
-    if command -v lxc >/dev/null 2>&1; then
+    if command -v "$RUNTIME_CLIENT" >/dev/null 2>&1; then
       return
     fi
     sleep 1
     tries=$((tries + 1))
   done
 
-  echo "오류: lxc 명령을 찾을 수 없습니다. snap 기반 LXD 설치가 완료되지 않았습니다."
+  echo "오류: $RUNTIME_CLIENT 명령을 찾을 수 없습니다. $CONTAINER_RUNTIME 설치가 완료되지 않았습니다."
   exit 1
 }
 
-resolve_lxd_binaries() {
+resolve_runtime_binaries() {
   local candidate
 
+  RUNTIME_CLIENT_BIN=""
   for candidate in \
-    "$(command -v lxd 2>/dev/null || true)" \
-    /snap/bin/lxd \
-    /var/lib/snapd/snap/bin/lxd
+    "/usr/bin/$RUNTIME_CLIENT" \
+    "/usr/local/bin/$RUNTIME_CLIENT" \
+    "/snap/bin/$RUNTIME_CLIENT" \
+    "/var/lib/snapd/snap/bin/$RUNTIME_CLIENT" \
+    "$(command -v "$RUNTIME_CLIENT" 2>/dev/null || true)"
   do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
-      LXD_BIN="$candidate"
+      RUNTIME_CLIENT_BIN="$candidate"
       break
     fi
   done
 
+  RUNTIME_DAEMON_BIN=""
   for candidate in \
-    "$(command -v lxc 2>/dev/null || true)" \
-    /snap/bin/lxc \
-    /var/lib/snapd/snap/bin/lxc
+    "/usr/bin/$RUNTIME_DAEMON" \
+    "/usr/local/bin/$RUNTIME_DAEMON" \
+    "/snap/bin/$RUNTIME_DAEMON" \
+    "/var/lib/snapd/snap/bin/$RUNTIME_DAEMON" \
+    "/opt/incus/bin/$RUNTIME_DAEMON" \
+    "$(command -v "$RUNTIME_DAEMON" 2>/dev/null || true)"
   do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
-      LXC_BIN="$candidate"
+      RUNTIME_DAEMON_BIN="$candidate"
       break
     fi
   done
 
-  if [[ -z "$LXD_BIN" || -z "$LXC_BIN" ]]; then
-    echo "오류: LXD 바이너리 경로를 찾을 수 없습니다."
+  if [[ -z "$RUNTIME_CLIENT_BIN" ]]; then
+    echo "오류: $RUNTIME_CLIENT 실행 파일을 찾을 수 없습니다."
     exit 1
   fi
 }
@@ -207,15 +293,34 @@ enable_extra_repos() {
 }
 
 install_lxd() {
-  if snap list lxd >/dev/null 2>&1 && command -v lxc >/dev/null 2>&1; then
+  if [[ "$CONTAINER_RUNTIME" == "incus" ]]; then
+    install_incus
+  else
+    install_lxd_snap
+  fi
+
+  wait_for_runtime_client
+  resolve_runtime_binaries
+  sudo usermod -aG "$CONTAINER_RUNTIME_GROUP" "$INSTALL_USER" 2>/dev/null || true
+}
+
+install_lxd_snap() {
+  if snap list lxd >/dev/null 2>&1 && [[ -x /snap/bin/lxc ]]; then
+    echo "=== 1. LXD 설치 (이미 설치됨) ==="
     return
   fi
 
-  echo "=== 1. LXD 설치 ==="
+  echo "=== 1. LXD 설치 (snap) ==="
 
   ensure_snapd
   sudo systemctl enable --now snapd.socket
   ensure_snap_path
+
+  # Ubuntu ships an `lxd-installer` stub at /usr/sbin/lxc that shadows the snap
+  # binary and tries to install LXD on first use. Remove it so the snap wins.
+  if [[ "$PKG_MGR" == "apt" ]]; then
+    sudo apt-get remove -y lxd-installer >/dev/null 2>&1 || true
+  fi
 
   if ! snap list lxd >/dev/null 2>&1; then
     sudo snap install lxd
@@ -224,10 +329,42 @@ install_lxd() {
   if systemctl list-unit-files | grep -q '^snap\.lxd\.daemon\.service'; then
     sudo systemctl enable --now snap.lxd.daemon
   fi
+}
 
-  sudo usermod -aG lxd "$INSTALL_USER" 2>/dev/null || true
-  wait_for_lxc
-  resolve_lxd_binaries
+install_incus() {
+  if command -v incus >/dev/null 2>&1; then
+    echo "=== 1. Incus 설치 (이미 설치됨) ==="
+    return
+  fi
+
+  echo "=== 1. Incus 설치 (Zabbly apt 저장소) ==="
+
+  if [[ "$PKG_MGR" != "apt" ]]; then
+    echo "오류: Incus 설치(Zabbly 저장소)는 현재 apt 기반 시스템만 지원합니다."
+    exit 1
+  fi
+
+  pkg_install ca-certificates curl gnupg lsb-release
+
+  if [[ ! -f /etc/apt/keyrings/zabbly.gpg ]]; then
+    sudo mkdir -p /etc/apt/keyrings
+    curl -fsSL https://pkgs.zabbly.com/key.asc | \
+      sudo gpg --dearmor --yes -o /etc/apt/keyrings/zabbly.gpg
+  fi
+
+  local codename="${VERSION_CODENAME:-}"
+  if [[ -z "$codename" ]] && command -v lsb_release >/dev/null 2>&1; then
+    codename="$(lsb_release -sc)"
+  fi
+  if [[ -z "$codename" ]]; then
+    echo "오류: 배포판 codename을 확인할 수 없습니다."
+    exit 1
+  fi
+
+  echo "deb [signed-by=/etc/apt/keyrings/zabbly.gpg] https://pkgs.zabbly.com/incus/stable ${codename} main" | \
+    sudo tee /etc/apt/sources.list.d/zabbly-incus-stable.list >/dev/null
+  APT_UPDATED=0
+  pkg_install incus
 }
 
 install_node() {
@@ -257,6 +394,10 @@ install_node() {
 }
 
 install_caddy() {
+  if [[ "$ENABLE_CADDY" != "1" ]]; then
+    return
+  fi
+
   if command -v caddy >/dev/null 2>&1; then
     return
   fi
@@ -287,20 +428,54 @@ install_platform_tools() {
   echo "=== 3. 기본 패키지 설치 ==="
 
   if [[ "$PKG_MGR" == "apt" ]]; then
-    pkg_install build-essential curl gawk jq make nftables network-manager python3 snapd
+    if [[ "$ENABLE_PUBLIC_IPS" == "1" ]]; then
+      pkg_install build-essential curl gawk jq make nftables network-manager python3
+    else
+      pkg_install build-essential curl gawk jq make nftables python3
+    fi
   else
     enable_extra_repos
-    pkg_install curl gcc gcc-c++ gawk jq make nftables NetworkManager python3 snapd
+    if [[ "$ENABLE_PUBLIC_IPS" == "1" ]]; then
+      pkg_install curl gcc gcc-c++ gawk jq make nftables NetworkManager python3
+    else
+      pkg_install curl gcc gcc-c++ gawk jq make nftables python3
+    fi
   fi
 }
 
 configure_lxd() {
-  resolve_lxd_binaries
-  sudo "$LXD_BIN" init --minimal
-  sudo "$LXC_BIN" network set lxdbr0 ipv4.address "${LXD_BRIDGE_IP}/24"
-  sudo "$LXC_BIN" network set lxdbr0 ipv4.nat true
-  sudo "$LXC_BIN" network set lxdbr0 ipv4.dhcp true
-  sudo usermod -aG lxd "$INSTALL_USER" 2>/dev/null || true
+  resolve_runtime_binaries
+
+  # wait until the daemon API answers before doing anything
+  local tries=0
+  while (( tries < 30 )); do
+    if sudo "$RUNTIME_CLIENT_BIN" query /1.0 >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+    tries=$((tries + 1))
+  done
+
+  if ! sudo "$RUNTIME_CLIENT_BIN" query /1.0 >/dev/null 2>&1; then
+    echo "오류: $CONTAINER_RUNTIME 데몬이 응답하지 않습니다."
+    exit 1
+  fi
+
+  # A fresh daemon already seeds the 'default' profile in its DB before init
+  # runs, so that is not a valid "initialized" signal. The presence of the
+  # 'default' storage pool (created by init) is.
+  if ! sudo "$RUNTIME_CLIENT_BIN" storage list --format=csv -c n 2>/dev/null | grep -qx default; then
+    if [[ "$SERVER_INIT_MODE" == "incus" ]]; then
+      sudo "$RUNTIME_CLIENT_BIN" admin init --minimal
+    else
+      sudo "$RUNTIME_DAEMON_BIN" init --minimal
+    fi
+  fi
+
+  sudo "$RUNTIME_CLIENT_BIN" network set "$LXD_BRIDGE_NAME" ipv4.address="${LXD_BRIDGE_IP}/24"
+  sudo "$RUNTIME_CLIENT_BIN" network set "$LXD_BRIDGE_NAME" ipv4.nat=true
+  sudo "$RUNTIME_CLIENT_BIN" network set "$LXD_BRIDGE_NAME" ipv4.dhcp=true
+  sudo usermod -aG "$CONTAINER_RUNTIME_GROUP" "$INSTALL_USER" 2>/dev/null || true
 
   if [[ -d "/home/$INSTALL_USER" ]]; then
     sudo install -d -o "$INSTALL_USER" -g "$INSTALL_USER" "/home/$INSTALL_USER/.config"
@@ -324,6 +499,11 @@ install_app() {
 }
 
 configure_caddy() {
+  if [[ "$ENABLE_CADDY" != "1" ]]; then
+    echo "=== 5. Caddy 설정 (건너뜀: ENABLE_CADDY=0) ==="
+    return
+  fi
+
   sudo mkdir -p /var/lib/caddy /.config/caddy 2>/dev/null || true
   sudo useradd -r -s /usr/sbin/nologin caddy 2>/dev/null || \
   sudo useradd -r -s /sbin/nologin caddy 2>/dev/null || true
@@ -334,6 +514,10 @@ configure_caddy() {
 }
 
 configure_networkmanager() {
+  if [[ "$ENABLE_PUBLIC_IPS" != "1" ]]; then
+    echo "=== 6. Secondary IP 설정 (건너뜀: ENABLE_PUBLIC_IPS=0) ==="
+    return
+  fi
   echo "=== 6. Secondary IP 설정 ==="
 
   if systemctl list-unit-files | grep -q '^NetworkManager\.service'; then
@@ -358,6 +542,10 @@ configure_networkmanager() {
 }
 
 configure_nftables() {
+  if [[ "$ENABLE_PUBLIC_IPS" != "1" ]]; then
+    echo "=== 7. nftables 설정 (건너뜀: ENABLE_PUBLIC_IPS=0) ==="
+    return
+  fi
   echo "=== 7. nftables 설정 ==="
   sudo mkdir -p /etc/nftables
   sudo cp "$SCRIPT_DIR/config/abuse-block.nft" /etc/nftables/
@@ -369,7 +557,7 @@ table inet student-nat {
 NFTEOF
 
   for i in "${!SECONDARY_IPS[@]}"; do
-    echo "        iifname != \"lxdbr0\" ip daddr ${SECONDARY_IPS[$i]} dnat to ${CONTAINER_IPS[$i]}" >> /tmp/student-nat-gen.nft
+    echo "        iifname != \"$LXD_BRIDGE_NAME\" ip daddr ${SECONDARY_IPS[$i]} dnat to ${CONTAINER_IPS[$i]}" >> /tmp/student-nat-gen.nft
   done
 
   cat >> /tmp/student-nat-gen.nft << 'NFTEOF'
@@ -402,7 +590,7 @@ NFTEOF
   # firewalld가 활성 상태면 lxdbr0을 trusted 존에 추가
   # (미설정 시 firewalld가 호스트↔컨테이너 트래픽을 차단함)
   if command -v firewall-cmd >/dev/null 2>&1 && sudo firewall-cmd --state >/dev/null 2>&1; then
-    sudo firewall-cmd --zone=trusted --add-interface=lxdbr0 --permanent
+    sudo firewall-cmd --zone=trusted --add-interface=$LXD_BRIDGE_NAME --permanent
     sudo firewall-cmd --reload
   fi
 }
@@ -410,25 +598,55 @@ NFTEOF
 configure_services() {
   echo "=== 8. systemd 서비스 등록 ==="
 
+  # sed replacement is fragile: escape \, & and | in the package list
+  local extra_sed="${CONTAINER_EXTRA_PACKAGES//\\/\\\\}"
+  extra_sed="${extra_sed//&/\\&}"
+  extra_sed="${extra_sed//|/\\|}"
+
   sed \
     -e "s/__RUN_USER__/$INSTALL_USER/g" \
     -e "s/__RUN_GROUP__/$INSTALL_USER/g" \
+    -e "s/__RUNTIME_GROUP__/$CONTAINER_RUNTIME_GROUP/g" \
+    -e "s/__RUNTIME_UNIT__/$RUNTIME_UNIT/g" \
+    -e "s/__CONTAINER_RUNTIME__/$CONTAINER_RUNTIME/g" \
+    -e "s/__RUNTIME_CLIENT__/$RUNTIME_CLIENT/g" \
     -e "s/__CONTAINER_COUNT__/$CONTAINER_COUNT/g" \
     -e "s/__CONTAINER_IP_OFFSET__/$CONTAINER_IP_OFFSET/g" \
+    -e "s/__CONTAINER_IP_PREFIX__/$CONTAINER_IP_PREFIX/g" \
+    -e "s/__CONTAINER_MEMORY__/$CONTAINER_MEMORY/g" \
+    -e "s/__CONTAINER_SWAP__/$CONTAINER_SWAP/g" \
+    -e "s|__CONTAINER_EXTRA_PACKAGES__|$extra_sed|g" \
+    -e "s/__CONTAINER_SSH_ENABLED__/$CONTAINER_SSH_ENABLED/g" \
+    -e "s|__CONTAINER_IMAGE__|$CONTAINER_IMAGE|g" \
+    -e "s/__LXD_BRIDGE_NAME__/$LXD_BRIDGE_NAME/g" \
     -e "s/__LXD_BRIDGE_IP__/$LXD_BRIDGE_IP/g" \
+    -e "s|__STORAGE_CONTAINERS_PATH__|$STORAGE_CONTAINERS_PATH|g" \
+    -e "s/__BIND_ADDRESS__/$BIND_ADDRESS/g" \
     "$SCRIPT_DIR/config/lxd-classroom.service.template" | sudo tee /etc/systemd/system/lxd-classroom.service >/dev/null
 
   sudo systemctl daemon-reload
   sudo systemctl enable --now lxd-classroom
-  sudo systemctl enable --now caddy
+  if [[ "$ENABLE_CADDY" == "1" ]]; then
+    sudo systemctl enable --now caddy
+  fi
 }
 
 create_containers() {
   echo "=== 9. 컨테이너 생성 (약 5~10분) ==="
   sudo env \
+    CONTAINER_RUNTIME="$CONTAINER_RUNTIME" \
+    RUNTIME_CLIENT="$RUNTIME_CLIENT" \
     CONTAINER_COUNT="$CONTAINER_COUNT" \
     CONTAINER_IP_OFFSET="$CONTAINER_IP_OFFSET" \
+    CONTAINER_IP_PREFIX="$CONTAINER_IP_PREFIX" \
+    CONTAINER_MEMORY="$CONTAINER_MEMORY" \
+    CONTAINER_SWAP="$CONTAINER_SWAP" \
+    CONTAINER_EXTRA_PACKAGES="$CONTAINER_EXTRA_PACKAGES" \
+    CONTAINER_SSH_ENABLED="$CONTAINER_SSH_ENABLED" \
+    CONTAINER_IMAGE="$CONTAINER_IMAGE" \
+    LXD_BRIDGE_NAME="$LXD_BRIDGE_NAME" \
     LXD_BRIDGE_IP="$LXD_BRIDGE_IP" \
+    STORAGE_CONTAINERS_PATH="$STORAGE_CONTAINERS_PATH" \
     PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin" \
     bash /opt/lxd-classroom/scripts/create-containers.sh
 }
@@ -448,8 +666,15 @@ create_containers
 echo ""
 echo "✓ 설치 완료!"
 echo "  패키지 관리자: $PKG_MGR"
+echo "  컨테이너 런타임: $CONTAINER_RUNTIME"
 echo "  컨테이너 수: $CONTAINER_COUNT"
-echo "  웹 UI: https://${DOMAIN}"
+if [[ "$ENABLE_CADDY" == "1" ]]; then
+  echo "  웹 UI: https://${DOMAIN}"
+else
+  echo "  웹 UI: http://<호스트IP>:3000  (BIND_ADDRESS=${BIND_ADDRESS})"
+fi
 echo "  관리자 초기 비밀번호: admin"
 echo ""
-echo "※ data.json에서 externalIps를 실제 공인 IP로 업데이트하세요."
+if [[ "$ENABLE_PUBLIC_IPS" == "1" ]]; then
+  echo "※ data.json에서 externalIps를 실제 공인 IP로 업데이트하세요."
+fi

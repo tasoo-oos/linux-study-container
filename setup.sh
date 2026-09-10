@@ -542,55 +542,64 @@ configure_networkmanager() {
 }
 
 configure_nftables() {
-  if [[ "$ENABLE_PUBLIC_IPS" != "1" ]]; then
-    echo "=== 7. nftables 설정 (건너뜀: ENABLE_PUBLIC_IPS=0) ==="
+  echo "=== 7. nftables 설정 ==="
+
+  if ! command -v nft >/dev/null 2>&1; then
+    echo "경고: nft 명령을 찾을 수 없습니다. nftables 설정을 건너뜁니다."
     return
   fi
-  echo "=== 7. nftables 설정 ==="
-  sudo mkdir -p /etc/nftables
-  sudo cp "$SCRIPT_DIR/config/abuse-block.nft" /etc/nftables/
 
-  cat > /tmp/student-nat-gen.nft << 'NFTEOF'
+  sudo mkdir -p /etc/nftables
+
+  # 공통 abuse 차단 규칙 (SMTP/BitTorrent) — 공인 IP 모드와 웹 전용 모드 모두 적용
+  sed -e "s|__LXD_BRIDGE_NAME__|$LXD_BRIDGE_NAME|g" \
+    "$SCRIPT_DIR/config/abuse-block.nft" | sudo tee /etc/nftables/abuse-block.nft >/dev/null
+  sudo nft -f /etc/nftables/abuse-block.nft
+
+  sudo touch "$NFTABLES_CONF"
+  sudo grep -q 'abuse-block' "$NFTABLES_CONF" 2>/dev/null || \
+    sudo bash -c "echo 'include \"/etc/nftables/abuse-block.nft\"' >> '$NFTABLES_CONF'"
+
+  if [[ "$ENABLE_PUBLIC_IPS" == "1" ]]; then
+    cat > /tmp/student-nat-gen.nft << 'NFTEOF'
 table inet student-nat {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
 NFTEOF
 
-  for i in "${!SECONDARY_IPS[@]}"; do
-    echo "        iifname != \"$LXD_BRIDGE_NAME\" ip daddr ${SECONDARY_IPS[$i]} dnat to ${CONTAINER_IPS[$i]}" >> /tmp/student-nat-gen.nft
-  done
+    for i in "${!SECONDARY_IPS[@]}"; do
+      echo "        iifname != \"$LXD_BRIDGE_NAME\" ip daddr ${SECONDARY_IPS[$i]} dnat to ${CONTAINER_IPS[$i]}" >> /tmp/student-nat-gen.nft
+    done
 
-  cat >> /tmp/student-nat-gen.nft << 'NFTEOF'
+    cat >> /tmp/student-nat-gen.nft << 'NFTEOF'
     }
     chain postrouting {
         type nat hook postrouting priority 95; policy accept;
 NFTEOF
 
-  for i in "${!SECONDARY_IPS[@]}"; do
-    echo "        ip saddr ${CONTAINER_IPS[$i]} ip daddr != ${LXD_BRIDGE_SUBNET} snat to ${SECONDARY_IPS[$i]}" >> /tmp/student-nat-gen.nft
-  done
+    for i in "${!SECONDARY_IPS[@]}"; do
+      echo "        ip saddr ${CONTAINER_IPS[$i]} ip daddr != ${LXD_BRIDGE_SUBNET} snat to ${SECONDARY_IPS[$i]}" >> /tmp/student-nat-gen.nft
+    done
 
-  echo "    }
+    echo "    }
 }" >> /tmp/student-nat-gen.nft
 
-  sudo cp /tmp/student-nat-gen.nft /etc/nftables/student-nat.nft
-  sudo nft -f /etc/nftables/student-nat.nft
-  sudo nft -f /etc/nftables/abuse-block.nft
+    sudo cp /tmp/student-nat-gen.nft /etc/nftables/student-nat.nft
+    sudo nft -f /etc/nftables/student-nat.nft
+    sudo grep -q 'student-nat' "$NFTABLES_CONF" 2>/dev/null || \
+      sudo bash -c "echo 'include \"/etc/nftables/student-nat.nft\"' >> '$NFTABLES_CONF'"
+  fi
 
-  sudo touch "$NFTABLES_CONF"
-  sudo grep -q 'student-nat' "$NFTABLES_CONF" 2>/dev/null || \
-    sudo bash -c "echo 'include \"/etc/nftables/student-nat.nft\"' >> '$NFTABLES_CONF'"
-  sudo grep -q 'abuse-block' "$NFTABLES_CONF" 2>/dev/null || \
-    sudo bash -c "echo 'include \"/etc/nftables/abuse-block.nft\"' >> '$NFTABLES_CONF'"
   sudo systemctl enable --now nftables
 
+  # 브리지를 오가는 트래픽도 netfilter가 보도록 br_netfilter 로드 (abuse 차단에 필요)
   echo 'br_netfilter' | sudo tee /etc/modules-load.d/br_netfilter.conf >/dev/null
   sudo modprobe br_netfilter
 
-  # firewalld가 활성 상태면 lxdbr0을 trusted 존에 추가
+  # firewalld가 활성 상태면 브리지를 trusted 존에 추가
   # (미설정 시 firewalld가 호스트↔컨테이너 트래픽을 차단함)
   if command -v firewall-cmd >/dev/null 2>&1 && sudo firewall-cmd --state >/dev/null 2>&1; then
-    sudo firewall-cmd --zone=trusted --add-interface=$LXD_BRIDGE_NAME --permanent
+    sudo firewall-cmd --zone=trusted --add-interface="$LXD_BRIDGE_NAME" --permanent
     sudo firewall-cmd --reload
   fi
 }

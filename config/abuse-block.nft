@@ -1,10 +1,10 @@
 table inet abuse-block {
     chain forward-filter {
         type filter hook forward priority filter + 5; policy accept;
-        iifname "lxdbr0" tcp dport 25 drop
-        iifname "lxdbr0" tcp dport 465 drop
-        iifname "lxdbr0" tcp dport 587 drop
-        iifname "lxdbr0" tcp dport 6881-6889 drop
-        iifname "lxdbr0" udp dport 6881-6889 drop
+        iifname "__LXD_BRIDGE_NAME__" tcp dport 25 drop
+        iifname "__LXD_BRIDGE_NAME__" tcp dport 465 drop
+        iifname "__LXD_BRIDGE_NAME__" tcp dport 587 drop
+        iifname "__LXD_BRIDGE_NAME__" tcp dport 6881-6889 drop
+        iifname "__LXD_BRIDGE_NAME__" udp dport 6881-6889 drop
     }
 }

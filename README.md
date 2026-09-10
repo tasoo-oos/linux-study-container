@@ -181,19 +181,22 @@ sudo nmcli connection up "$CONN"
 #### 6. nftables
 
 ```bash
-sudo cp config/abuse-block.nft /etc/nftables/
-# student-nat.nft는 .env 기준으로 자동 생성
+# abuse-block.nft는 템플릿입니다. 런타임 브리지 이름으로 치환하세요.
+#   LXD: lxdbr0, Incus: incusbr0
+sed "s/__LXD_BRIDGE_NAME__/lxdbr0/g" config/abuse-block.nft | sudo tee /etc/nftables/abuse-block.nft
 sudo nft -f /etc/nftables/abuse-block.nft
 
-# 부팅 시 자동 로드
+# student-nat.nft는 ENABLE_PUBLIC_IPS=1일 때 .env 기준으로 자동 생성
 echo 'include "/etc/nftables/student-nat.nft"' | sudo tee -a /etc/nftables.conf
 echo 'include "/etc/nftables/abuse-block.nft"' | sudo tee -a /etc/nftables.conf
 sudo systemctl enable nftables
 
-# br_netfilter
+# br_netfilter (abuse 차단 규칙에 필요)
 echo 'br_netfilter' | sudo tee /etc/modules-load.d/br_netfilter.conf
 sudo modprobe br_netfilter
 ```
+
+> `abuse-block.nft`(SMTP/BitTorrent 차단)는 `ENABLE_PUBLIC_IPS` 값과 무관하게 적용됩니다.
 
 #### 7. 컨테이너 생성
 
